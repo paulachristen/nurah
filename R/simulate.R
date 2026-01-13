@@ -47,55 +47,30 @@
 #' @param noise_level Numeric factor to scale stochastic noise in node simulations.
 #' \code{noise_level = 0} produces fully deterministic output, while \code{noise_level = 1}
 #' uses the full specified randomness. Defaults to 1.
+#' @param mortality_node Character name of the mortality outcome node. If specified,
+#' this node will be simulated using negative binomial distribution with population offset.
+#' @param mortality_phi Overdispersion parameter for negative binomial mortality. Default 1.
+#' @param mortality_intercept Baseline log-rate for mortality (on log scale). Default -8
+#' (approximately 0.03 deaths per 1000 per day).
 #'
 #' @return A data frame of simulated indicators aggregated at the requested time
-#' resolution. It contains one row per region per period, with a \code{date} column
-#' indicating the period start date, and columns for each simulated indicator (node)
-#' as well as \code{population}.
-#'
-#' @details This function performs the following steps:
-#' \enumerate{
-#'   \item Validates the temporal inputs and generates a daily date sequence and an
-#'         output period sequence using \code{setup_temporal_structure()}.
-#'   \item Prepares the spatial structure (region hierarchy and names) using
-#'         \code{setup_spatial_structure()}.
-#'   \item Initializes a daily data frame with one row per region per day.
-#'   \item Determines the simulation order of nodes using
-#'         \code{topological_sort_dag()} (ensuring that parent nodes are simulated
-#'         before their children).
-#'   \item Simulates each non-population node's daily values in order using
-#'         \code{simulate_node()}, and adds them as new columns to the daily data.
-#'   \item Simulates dynamic population changes (if a population node is defined)
-#'         using \code{simulate_population_dynamics()}, updating the population column
-#'         based on IDP inflows/outflows and initial populations.
-#'   \item Aggregates the daily data to the specified output resolution using
-#'         \code{aggregate_simulated_data()}.
-#' }
-#'
-#' The \code{nurah_dag} object provides the structural relationships between nodes.
-#' Each directed edge in \code{dag$parameters} has an \code{effect_size} and an optional
-#' \code{lag} (in days). For each node, if no explicit formula is provided, the expected
-#' value is computed as the sum of its parent values (lagged by the specified \code{lag})
-#' each multiplied by its \code{effect_size}. Nodes with no parents default to a baseline
-#' of 0 (unless a specific baseline or distribution is defined). If the DAG includes a
-#' "population" node, that node's value is simulated via dynamic population flows rather
-#' than the static DAG relationships.
+#' resolution (default: monthly). Contains one row per governorate per month with columns
+#' for each simulated indicator including mortality counts (Y_it) and population (N_it).
 #'
 #' @examples
-#' # Define a simple DAG: A -> B -> C
-#' nodes <- c("A", "B", "C")
-#' edges <- data.frame(from = c("A", "B"), to = c("B", "C"))
-#' parameters <- data.frame(from = c("A", "B"), to = c("B", "C"),
-#'                          effect_size = c(1.0, 1.0), lag = c(0, 0))
-#' dag <- define_dag(nodes, edges, parameters)
-#' sim_data <- simulate_crisis_data(dag, start_date = "2020-01-01", n_periods = 2,
-#'                                  resolution = "month", spatial_structure = paste0("region", 1:2),
-#'                                  initial_population = 10000, noise_level = 0.5)
+#' # Simulate 10 governorates x 12 months with mortality outcome
+#' dag <- checchi_2017_dag(parameters = dummy_checchi_2017_parameters())
+#' sim_data <- simulate_crisis_data(
+#'   dag,
+#'   start_date = "2023-10-01",
+#'   n_periods = 12,
+#'   resolution = "month",
+#'   spatial_structure = paste0("gov", 1:10),
+#'   initial_population = 100000,
+#'   noise_level = 1,
+#'   mortality_node = "Population mortality"
+#' )
 #' head(sim_data)
-#'
-#' # Using a built-in DAG (e.g., Checchi et al. 2017 model) if available:
-#' # sim_data <- simulate_crisis_data(checchi_2017_dag(parameters = params),
-#' #                                  start_date = "2020-01-01", n_periods = 6, resolution = "month")
 #' @export
 simulate_crisis_data <- function(dag = NULL,
                                  start_date,
@@ -104,7 +79,10 @@ simulate_crisis_data <- function(dag = NULL,
                                  resolution = "month",
                                  spatial_structure = 1,
                                  initial_population = 10000,
-                                 noise_level = 1) {
+                                 noise_level = 1,
+                                 mortality_node = NULL,
+                                 mortality_phi = 1,
+                                 mortality_intercept = -8) {
   # If no DAG provided, use a default if available (e.g., checchi_2017_dag)
   if (is.null(dag)) {
     if (exists("checchi_2017_dag", mode = "function")) {
@@ -135,6 +113,13 @@ simulate_crisis_data <- function(dag = NULL,
   daily_data$date <- rep(time_seq_daily, times = n_regions)
   # Ensure daily_data is ordered by region then date (by construction it is in that order)
 
+  # Add governorate index for convenience
+  region_id_col <- names(region_df)[ncol(region_df)]
+  daily_data$gov_id <- as.numeric(factor(daily_data[[region_id_col]]))
+
+  # Add time index (month within simulation)
+  daily_data$time_id <- as.numeric(factor(format(daily_data$date, "%Y-%m")))
+
   # Determine simulation order for nodes (topologically sorted)
   node_order <- topological_sort_dag(dag)
   # Identify if a dynamic population node exists in DAG (case-insensitive match for "population")
@@ -144,7 +129,14 @@ simulate_crisis_data <- function(dag = NULL,
     node_order <- setdiff(node_order, pop_node)
   }
 
-  # Simulate each node in topological order (except dynamic population)
+  # Identify mortality node for special handling
+  mortality_in_order <- NULL
+  if (!is.null(mortality_node) && mortality_node %in% node_order) {
+    mortality_in_order <- mortality_node
+    node_order <- setdiff(node_order, mortality_node)
+  }
+
+  # Simulate each node in topological order (except dynamic population and mortality)
   for (node in node_order) {
     # Determine this node's parent nodes from the DAG structure
     parents_df <- dag$parameters[dag$parameters$to == node, , drop = FALSE]
@@ -221,6 +213,20 @@ simulate_crisis_data <- function(dag = NULL,
     }))
   }
 
+  # Simulate mortality node using negative binomial if specified
+  if (!is.null(mortality_in_order)) {
+    daily_data <- simulate_mortality_negbin(
+      daily_data = daily_data,
+      dag = dag,
+      mortality_node = mortality_in_order,
+      phi = mortality_phi,
+      intercept = mortality_intercept,
+      noise_level = noise_level,
+      n_days = n_days,
+      n_regions = n_regions
+    )
+  }
+
   # Aggregate daily data to the desired output resolution
   if (tolower(resolution) == "day") {
     # If output resolution is daily, return the daily_data (ordered by date and region)
@@ -230,7 +236,101 @@ simulate_crisis_data <- function(dag = NULL,
     output_data <- aggregate_simulated_data(daily_data, time_seq_out = time_seq_out)
   }
 
+  # Store true parameters as attributes for later recovery evaluation
+  attr(output_data, "true_params") <- list(
+    mortality_phi = mortality_phi,
+    mortality_intercept = mortality_intercept,
+    dag_parameters = dag$parameters
+  )
+
   return(output_data)
+}
+
+
+#' Simulate Mortality Using Negative Binomial Distribution
+#'
+#' Simulates mortality counts Y_it ~ NegBin(mu_it, phi) with:
+#' log(mu_it) = log(N_it) + eta_it
+#' eta_it = intercept + sum_j beta_j * parent_j(it) + random effects (optional)
+#'
+#' @param daily_data Daily simulation data with population column
+#' @param dag DAG object containing parameters
+#' @param mortality_node Name of mortality outcome node
+#' @param phi Overdispersion parameter (higher = less overdispersion; phi -> Inf gives Poisson)
+#' @param intercept Baseline log-rate intercept
+#' @param noise_level Noise scaling factor
+#' @param n_days Number of days in simulation
+#' @param n_regions Number of regions
+#'
+#' @return daily_data with mortality column added
+#' @keywords internal
+simulate_mortality_negbin <- function(daily_data, dag, mortality_node,
+                                      phi = 1, intercept = -8,
+                                      noise_level = 1, n_days, n_regions) {
+
+  # Get parent nodes and effect sizes for mortality
+  parents_df <- dag$parameters[dag$parameters$to == mortality_node, , drop = FALSE]
+  parent_names <- as.character(parents_df$from)
+
+  # Compute linear predictor eta_it
+  n <- nrow(daily_data)
+  eta <- rep(intercept, n)
+
+  if (length(parent_names) > 0 && nrow(parents_df) > 0) {
+    # Collect parent data with lags
+    parent_data <- daily_data[, parent_names, drop = FALSE]
+
+    # Apply lags to parent data
+    if ("lag" %in% names(parents_df)) {
+      for (i in seq_len(nrow(parents_df))) {
+        parent <- parents_df$from[i]
+        lag_days <- ifelse(is.na(parents_df$lag[i]), 0, parents_df$lag[i])
+        if (lag_days > 0 && parent %in% names(parent_data)) {
+          parent_vec <- daily_data[[parent]]
+          parent_mat <- matrix(parent_vec, nrow = n_days, ncol = n_regions, byrow = FALSE)
+          if (lag_days >= n_days) {
+            parent_mat[] <- 0
+          } else {
+            parent_mat[(lag_days + 1):n_days, ] <- parent_mat[1:(n_days - lag_days), ]
+            parent_mat[1:lag_days, ] <- 0
+          }
+          parent_data[[as.character(parent)]] <- as.vector(parent_mat)
+        }
+      }
+    }
+
+    # Compute linear combination
+    effect_sizes <- parents_df$effect_size
+    parent_mat <- as.matrix(parent_data)
+    # Scale effect sizes for mortality (effects are typically much smaller on log-rate scale)
+    scaled_effects <- effect_sizes * 0.01  # Scale down for reasonable mortality rates
+    eta <- eta + as.vector(parent_mat %*% scaled_effects)
+  }
+
+  # Add optional random effects for governorate (spatial heterogeneity)
+  if (noise_level > 0) {
+    gov_re <- stats::rnorm(n_regions, 0, 0.2 * noise_level)
+    eta <- eta + gov_re[daily_data$gov_id]
+  }
+
+  # Compute mu_it = N_it * exp(eta_it)
+  # Use population as offset
+  N_it <- pmax(daily_data$population, 1)  # Ensure positive
+  mu_it <- N_it * exp(eta)
+
+  # Simulate Y_it ~ NegBin(mu_it, phi)
+  # Using size = phi, mu = mu_it parameterization
+  # Var(Y) = mu + mu^2/phi
+  if (noise_level == 0) {
+    # Deterministic: return expected value
+    daily_data[[mortality_node]] <- round(mu_it)
+  } else {
+    # Ensure phi is positive
+    phi_adj <- max(phi, 0.01)
+    daily_data[[mortality_node]] <- stats::rnbinom(n, size = phi_adj, mu = mu_it)
+  }
+
+  return(daily_data)
 }
 
 
@@ -253,70 +353,16 @@ simulate_crisis_data <- function(dag = NULL,
 #'           \code{NULL} if none).
 #'     \item \code{dist}: Distribution type for the node's stochastic simulation. For
 #'           example, \code{"normal"} for a continuous variable, \code{"poisson"} for
-#'           counts, \code{"binary"} (or \code{"bernoulli"}) for 0/1 outcomes, or
-#'           \code{"none"} for deterministic.
-#'     \item Additional parameters specific to the distribution and relationship. For
-#'           example, \code{formula} (a function defining the deterministic relationship
-#'           between parent values and this node's expected value), \code{mean} or
-#'           \code{base} for a baseline value (if no parents), \code{sd} for standard
-#'           deviation (for normal noise), etc. If \code{dag_params$effect_size} is
-#'           provided (as a numeric vector corresponding to each parent in \code{parents}),
-#'           it will be used to compute a linear combination of parent values when no
-#'           explicit formula is given.
+#'           counts, \code{"negbin"} for negative binomial, \code{"binary"} (or
+#'           \code{"bernoulli"}) for 0/1 outcomes, or \code{"none"} for deterministic.
+#'     \item Additional parameters specific to the distribution and relationship.
 #'   }
 #' @param noise_level Numeric factor to scale the stochastic noise. \code{noise_level = 0}
 #' produces deterministic output (no randomness), while \code{noise_level = 1} uses the
 #' full noise as specified in \code{dag_params}. Default is 1.
 #'
-#' @return A numeric vector of simulated values for the node, with length equal to the
-#' number of observations (rows) in \code{parents_data} (or the specified number of
-#' observations if \code{parents_data} is a list). This vector can be added as a new
-#' column in the simulation output for the node.
+#' @return A numeric vector of simulated values for the node.
 #'
-#' @details The function first computes the deterministic component of the node's value
-#' based on its parents and specified relationship. If a \code{formula} function is
-#' provided in \code{dag_params}, it will be called with the parent values to compute
-#' an expected value for the node. If no parents and a baseline value (e.g., \code{mean})
-#' is provided, that baseline is used (recycled to the needed length). If no formula or
-#' baseline is given, and effect sizes are provided for parent relationships, the
-#' deterministic value is computed as the sum of each parent value multiplied by its
-#' corresponding \code{effect_size}. If none of these are provided, the deterministic
-#' component defaults to 0.
-#'
-#' Then, based on the specified \code{dist}, random noise is added as follows:
-#' \itemize{
-#'   \item \code{"normal"}: Adds Gaussian noise with standard deviation \code{sd}
-#'         (from \code{dag_params}, default 1 if not provided), scaled by \code{noise_level}.
-#'         The deterministic result (or baseline) is treated as the mean.
-#'   \item \code{"poisson"}: Treats the deterministic result as the rate (lambda) and
-#'         draws Poisson random values.
-#'   \item \code{"binary"} or \code{"bernoulli"}: Treats the deterministic result as a
-#'         probability (between 0 and 1) and draws 0/1 outcomes (using \code{rbinom}
-#'         with size = 1).
-#'   \item \code{"none"} or if no \code{dist} is given: Returns the deterministic
-#'         result without additional noise.
-#'   \item Any unrecognized \code{dist}: A warning is issued and the deterministic
-#'         result is returned as-is.
-#' }
-#'
-#' If the node has no parents and no formula, a constant value can be simulated by
-#' providing a distribution and parameters (for example, \code{dist = "normal", mean = 5, sd = 1}
-#' will ignore \code{parents_data} and produce values around 5).
-#'
-#' @examples
-#' # Simulate a node with no parents (deterministic constant)
-#' simulate_node(node = "X", parents_data = data.frame(),
-#'              dag_params = list(dist = "normal", mean = 5, sd = 1), noise_level = 0.0)
-#' #> [1] 5 5 5 ...  (all values ~5 with no noise)
-#'
-#' # Simulate a node Y with parent X, linear effect and some noise
-#' set.seed(123)
-#' X_vals <- rnorm(100, mean = 10, sd = 2)
-#' parents_data <- data.frame(X = X_vals)
-#' dag_params <- list(parents = "X", effect_size = 0.5, dist = "normal", sd = 1)
-#' Y_vals <- simulate_node(node = "Y", parents_data = parents_data,
-#'                         dag_params = dag_params, noise_level = 1)
-#' # Y_vals is roughly 0.5 * X_vals plus random noise with sd = 1.
 #' @export
 simulate_node <- function(node, parents_data, dag_params, noise_level = 1) {
   # Determine number of observations to simulate
@@ -395,6 +441,11 @@ simulate_node <- function(node, parents_data, dag_params, noise_level = 1) {
     # Treat deterministic result as rate (lambda) for Poisson
     lambda <- pmax(result_det, 0)  # ensure lambda is non-negative
     result <- stats::rpois(n, lambda = lambda)
+  } else if (dist == "negbin") {
+    # Negative binomial: treat result_det as mu (mean), use provided phi (size)
+    mu <- pmax(result_det, 0.001)
+    phi <- dag_params$phi %||% 1
+    result <- stats::rnbinom(n, size = phi, mu = mu)
   } else if (dist %in% c("binary", "bernoulli")) {
     # Treat deterministic result as probability for binary outcome
     prob <- pmin(pmax(result_det, 0), 1)  # clamp between 0 and 1
@@ -409,6 +460,279 @@ simulate_node <- function(node, parents_data, dag_params, noise_level = 1) {
   }
 
   return(result)
+}
+
+
+#' Simulate Missingness in Predictor Variables
+#'
+#' Generates observation indicators S_itk ~ Bernoulli(pi_itk) for each predictor column k,
+#' where logit(pi_itk) depends on the specified missingness regime.
+#'
+#' @param data Data frame containing simulated data at governorate-month level
+#' @param predictors Character vector of predictor column names to apply missingness to
+#' @param regime Missingness regime: "MCAR", "MAR", or "MNAR"
+#' @param pi_base Baseline observation probability (for MCAR or intercept)
+#' @param mar_drivers Character vector of column names driving MAR missingness (e.g., conflict indicators)
+#' @param mar_weights Named numeric vector of weights for MAR drivers on logit scale
+#' @param mnar_omega MNAR sensitivity parameter: weight on the (unobserved) value itself
+#' @param outcome_missing Logical: also apply missingness to outcome variable? Default FALSE.
+#' @param outcome_col Name of outcome column if outcome_missing = TRUE
+#'
+#' @return A list containing:
+#'   - data: Original data with values set to NA where not observed
+#'   - observed_indicators: Data frame of observation indicators S_itk (1=observed, 0=missing)
+#'   - missingness_params: List of parameters used
+#'
+#' @details
+#' Three missingness regimes:
+#'   (a) MCAR: S_itk ~ Bernoulli(pi_base) independently
+#'   (b) MAR-access: logit(pi_itk) = alpha + w_A*A_it + w_D*D_it + ...
+#'   (c) MNAR-severity: logit(pi_itk) = alpha + w_A*A_it + omega*X_itk (depends on unobserved value)
+#'
+#' @examples
+#' # Apply MAR missingness driven by conflict intensity
+#' result <- simulate_missingness(
+#'   data = sim_data,
+#'   predictors = c("Nutritional status", "Burden of endemic infectious diseases"),
+#'   regime = "MAR",
+#'   pi_base = 0.7,
+#'   mar_drivers = c("Exposure to armed attacks or mechanical force of nature"),
+#'   mar_weights = c("Exposure to armed attacks or mechanical force of nature" = -0.5)
+#' )
+#' @export
+simulate_missingness <- function(data,
+                                 predictors,
+                                 regime = c("MCAR", "MAR", "MNAR"),
+                                 pi_base = 0.8,
+                                 mar_drivers = NULL,
+                                 mar_weights = NULL,
+                                 mnar_omega = 0,
+                                 outcome_missing = FALSE,
+                                 outcome_col = NULL) {
+
+  regime <- match.arg(regime)
+  n <- nrow(data)
+
+  # Validate predictors exist
+  missing_preds <- setdiff(predictors, names(data))
+  if (length(missing_preds) > 0) {
+    stop("Predictors not found in data: ", paste(missing_preds, collapse = ", "))
+  }
+
+  # Initialize observation indicators (1 = observed)
+  obs_indicators <- data.frame(matrix(1L, nrow = n, ncol = length(predictors)))
+  names(obs_indicators) <- predictors
+
+  # Compute logit(pi) baseline
+  alpha <- stats::qlogis(pi_base)  # logit(pi_base)
+
+  for (k in predictors) {
+    # Compute logit(pi_itk) based on regime
+    logit_pi <- rep(alpha, n)
+
+    if (regime == "MAR" && !is.null(mar_drivers)) {
+      # MAR: add contributions from observed drivers
+      for (driver in mar_drivers) {
+        if (driver %in% names(data)) {
+          w <- if (!is.null(mar_weights) && driver %in% names(mar_weights)) {
+            mar_weights[[driver]]
+          } else {
+            -0.3  # default negative weight (more conflict -> less observation)
+          }
+          # Standardize driver for stable coefficients
+          driver_vals <- data[[driver]]
+          driver_std <- (driver_vals - mean(driver_vals, na.rm = TRUE)) /
+            (sd(driver_vals, na.rm = TRUE) + 1e-8)
+          logit_pi <- logit_pi + w * driver_std
+        }
+      }
+    }
+
+    if (regime == "MNAR" && mnar_omega != 0) {
+      # MNAR: probability depends on the value itself
+      x_vals <- data[[k]]
+      x_std <- (x_vals - mean(x_vals, na.rm = TRUE)) / (sd(x_vals, na.rm = TRUE) + 1e-8)
+      logit_pi <- logit_pi + mnar_omega * x_std
+
+      # Also add MAR drivers if specified
+      if (!is.null(mar_drivers)) {
+        for (driver in mar_drivers) {
+          if (driver %in% names(data) && driver != k) {
+            w <- if (!is.null(mar_weights) && driver %in% names(mar_weights)) {
+              mar_weights[[driver]]
+            } else {
+              -0.3
+            }
+            driver_vals <- data[[driver]]
+            driver_std <- (driver_vals - mean(driver_vals, na.rm = TRUE)) /
+              (sd(driver_vals, na.rm = TRUE) + 1e-8)
+            logit_pi <- logit_pi + w * driver_std
+          }
+        }
+      }
+    }
+
+    # Convert to probability and simulate observation indicator
+    pi_itk <- stats::plogis(logit_pi)
+    obs_indicators[[k]] <- stats::rbinom(n, size = 1, prob = pi_itk)
+  }
+
+  # Apply missingness to data
+  data_missing <- data
+  for (k in predictors) {
+    data_missing[[k]][obs_indicators[[k]] == 0] <- NA
+  }
+
+  # Optionally apply to outcome
+  if (outcome_missing && !is.null(outcome_col) && outcome_col %in% names(data)) {
+    logit_pi_y <- rep(alpha, n)
+    if (regime != "MCAR" && !is.null(mar_drivers)) {
+      for (driver in mar_drivers) {
+        if (driver %in% names(data)) {
+          w <- mar_weights[[driver]] %||% -0.3
+          driver_vals <- data[[driver]]
+          driver_std <- (driver_vals - mean(driver_vals, na.rm = TRUE)) /
+            (sd(driver_vals, na.rm = TRUE) + 1e-8)
+          logit_pi_y <- logit_pi_y + w * driver_std
+        }
+      }
+    }
+    pi_y <- stats::plogis(logit_pi_y)
+    obs_y <- stats::rbinom(n, size = 1, prob = pi_y)
+    obs_indicators[[outcome_col]] <- obs_y
+    data_missing[[outcome_col]][obs_y == 0] <- NA
+  }
+
+  return(list(
+    data = data_missing,
+    observed_indicators = obs_indicators,
+    missingness_params = list(
+      regime = regime,
+      pi_base = pi_base,
+      mar_drivers = mar_drivers,
+      mar_weights = mar_weights,
+      mnar_omega = mnar_omega
+    )
+  ))
+}
+
+
+#' Apply Missingness Mask to Simulated Data
+#'
+#' Forces the simulated dataset to follow an external missingness pattern (e.g., from Gaza data).
+#'
+#' @param data Data frame of simulated data at governorate-month level
+#' @param mask Data frame specifying missingness pattern with columns:
+#'   - gov: governorate identifier (must match data)
+#'   - month: month identifier or date
+#'   - var: variable name
+#'   - observed: 1 if observed, 0 if missing
+#' @param gov_col Name of governorate column in data (default: auto-detected)
+#' @param date_col Name of date/month column in data (default: "date")
+#' @param mode How to apply mask:
+#'   - "force": directly apply mask (set to NA where observed=0)
+#'   - "calibrate": estimate missingness parameters to match mask proportions, then simulate
+#'
+#' @return Data frame with missingness applied according to mask
+#'
+#' @examples
+#' # Create a mask matching Gaza reporting patterns
+#' gaza_mask <- data.frame(
+#'   gov = rep(c("North Gaza", "Gaza City"), each = 6),
+#'   month = rep(1:6, 2),
+#'   var = "Nutritional status",
+#'   observed = c(1,1,0,0,0,0, 1,1,1,0,0,0)  # reporting stops mid-crisis
+#' )
+#' data_masked <- apply_mask(sim_data, gaza_mask, mode = "force")
+#'
+#' @export
+apply_mask <- function(data,
+                       mask,
+                       gov_col = NULL,
+                       date_col = "date",
+                       mode = c("force", "calibrate")) {
+
+  mode <- match.arg(mode)
+
+  # Auto-detect governorate column if not specified
+  if (is.null(gov_col)) {
+    # Look for common names
+    candidates <- c("gov", "governorate", "region", "district", "gov_id")
+    gov_col <- intersect(candidates, names(data))[1]
+    if (is.na(gov_col)) {
+      # Use last non-date, non-numeric column
+      non_num_cols <- names(data)[!sapply(data, is.numeric)]
+      gov_col <- setdiff(non_num_cols, c(date_col, "period_start"))[1]
+    }
+  }
+
+  # Validate mask structure
+  required_mask_cols <- c("gov", "var", "observed")
+  if (!all(required_mask_cols %in% names(mask))) {
+    stop("Mask must contain columns: gov, var, observed (and optionally month)")
+  }
+
+  # Add month identifier to data if not present
+  if (!"month" %in% names(data) && date_col %in% names(data)) {
+    data$month <- as.numeric(format(as.Date(data[[date_col]]), "%m")) +
+      (as.numeric(format(as.Date(data[[date_col]]), "%Y")) -
+         min(as.numeric(format(as.Date(data[[date_col]]), "%Y")))) * 12
+  }
+
+  # Standardize governorate names in mask to match data
+  data_govs <- unique(data[[gov_col]])
+  mask_govs <- unique(mask$gov)
+
+  if (mode == "force") {
+    # Directly apply mask
+    data_masked <- data
+
+    for (i in seq_len(nrow(mask))) {
+      gov_match <- mask$gov[i]
+      var_name <- mask$var[i]
+      obs_val <- mask$observed[i]
+
+      if (var_name %in% names(data_masked)) {
+        # Find matching rows
+        if ("month" %in% names(mask)) {
+          month_match <- mask$month[i]
+          row_idx <- which(data_masked[[gov_col]] == gov_match &
+                             data_masked$month == month_match)
+        } else {
+          row_idx <- which(data_masked[[gov_col]] == gov_match)
+        }
+
+        # Apply missingness
+        if (length(row_idx) > 0 && obs_val == 0) {
+          data_masked[[var_name]][row_idx] <- NA
+        }
+      }
+    }
+
+    return(data_masked)
+
+  } else if (mode == "calibrate") {
+    # Calibrate missingness parameters to match mask proportions
+    # Then simulate missingness with those parameters
+
+    # Compute target missingness proportion by variable
+    target_props <- stats::aggregate(observed ~ var, data = mask, FUN = mean)
+
+    # For each variable, find pi_base that matches observed proportion
+    data_masked <- data
+    for (i in seq_len(nrow(target_props))) {
+      var_name <- target_props$var[i]
+      target_pi <- target_props$observed[i]
+
+      if (var_name %in% names(data_masked)) {
+        # Simulate with calibrated pi_base
+        obs_ind <- stats::rbinom(nrow(data_masked), size = 1, prob = target_pi)
+        data_masked[[var_name]][obs_ind == 0] <- NA
+      }
+    }
+
+    return(data_masked)
+  }
 }
 
 
@@ -444,30 +768,6 @@ simulate_node <- function(node, parents_data, dag_params, noise_level = 1) {
 #' @return The \code{daily_data} data frame with an additional column \code{population},
 #' giving the simulated population for each region on each day.
 #'
-#' @details The population on the first day for each region is set to the given
-#' \code{initial_population}. Thereafter, for each subsequent day (per region), the
-#' population is updated as:
-#' \deqn{population_{t} = population_{t-1} + \text{IDP_in}_{t} - \text{IDP_out}_{t}}
-#' If only a single net flow column is available (e.g., total net change in population),
-#' specify that column as \code{idp_in_col} and set \code{idp_out_col = NULL} (or leave
-#' it absent in the data). In that case, positive values in the inflow column will
-#' increase the population and negative values will decrease it.
-#'
-#' If no IDP flow columns are present in \code{daily_data}, this function will simply
-#' assign the initial population to all days (i.e., population remains constant over time
-#' in each region).
-#'
-#' @examples
-#' # Example daily data for 2 regions over 3 days
-#' daily <- data.frame(
-#'   region = rep(c("Region1", "Region2"), each = 3),
-#'   date = rep(seq.Date(as.Date("2021-01-01"), by = "day", length.out = 3), 2),
-#'   idp_in = c(5, 2, 0,  3, 1, 0),   # IDP inflows
-#'   idp_out = c(1, 0, 0,  2, 2, 1)   # IDP outflows
-#' )
-#' init_pop <- c(Region1 = 100, Region2 = 200)
-#' result <- simulate_population_dynamics(daily, initial_population = init_pop)
-#' result$population  # population trajectory for each region
 #' @export
 simulate_population_dynamics <- function(daily_data, initial_population,
                                          idp_in_col = "idp_in", idp_out_col = "idp_out") {
@@ -476,7 +776,8 @@ simulate_population_dynamics <- function(daily_data, initial_population,
     stop("daily_data must contain a 'date' column.")
   }
   # Identify region identifier columns (all non-date, non-flow, non-population columns)
-  region_cols <- names(daily_data)[!names(daily_data) %in% c("date", idp_in_col, idp_out_col, "population")]
+  region_cols <- names(daily_data)[!names(daily_data) %in% c("date", idp_in_col, idp_out_col,
+                                                             "population", "gov_id", "time_id")]
   if (length(region_cols) < 1) {
     stop("daily_data must contain at least one region identifier column.")
   }
@@ -583,26 +884,6 @@ simulate_population_dynamics <- function(daily_data, initial_population,
 #' aggregated. Flow metrics (e.g., daily counts) are summed over the period, while the
 #' \code{population} column (if present) is taken as the last day's value in the period.
 #'
-#' @details The function first determines the period intervals either from \code{time_seq_out}
-#' or by generating a sequence based on \code{start_date} and \code{resolution}. It then
-#' assigns each daily record to a period. Aggregation is performed by grouping by region
-#' (all region hierarchy columns) and period start, and summing all numeric columns. For
-#' stock variables such as population, the function automatically takes the last observed
-#' value in each period (instead of summing). Additional logic can be added for other
-#' stock variables if needed.
-#'
-#' @examples
-#' # Create a simple daily dataset for one region
-#' daily <- data.frame(
-#'   region = "Region1",
-#'   date = seq.Date(as.Date("2021-01-01"), by = "day", length.out = 10),
-#'   cases = 1:10,          # some flow variable (e.g., daily cases)
-#'   population = 100 + 0:9 # a stock variable that increases daily
-#' )
-#' # Aggregate to weekly periods (2 weeks from the start date)
-#' weekly <- aggregate_simulated_data(daily, resolution = "week")
-#' weekly
-#' # The 'cases' for each week are summed, 'population' is the last day's population in that week.
 #' @export
 aggregate_simulated_data <- function(daily_data, time_seq_out = NULL, resolution = NULL, start_date = NULL) {
   if (!("date" %in% names(daily_data))) {
