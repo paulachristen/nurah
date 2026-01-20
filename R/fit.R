@@ -92,6 +92,29 @@ fit_dag <- function(data, dag, outcome,
     stop("Outcome variable '", outcome, "' not found in `data`.")
   }
 
+
+  # Helper function to make syntactically valid names
+  make_safe_name <- function(x) {
+    gsub("[^a-zA-Z0-9]", "_", x)
+  }
+
+  # Create column name mapping (original -> safe)
+  original_names <- names(data)
+  safe_names <- make_safe_name(original_names)
+  name_map <- setNames(original_names, safe_names)
+
+  # Rename columns in data
+  names(data) <- safe_names
+
+  # Update outcome and spatial_levels to safe names
+  outcome_safe <- make_safe_name(outcome)
+  if (!is.null(spatial_levels)) {
+    spatial_levels <- make_safe_name(spatial_levels)
+  }
+  if (!is.null(offset_col)) {
+    offset_col <- make_safe_name(offset_col)
+  }
+
   # Construct fixed-effects formula from DAG (unless overridden)
   if (is.null(formula_override)) {
     if (!inherits(dag, "nurah_dag")) {
@@ -121,14 +144,15 @@ fit_dag <- function(data, dag, outcome,
       direct_causes <- character(0)
     }
 
-    # Filter to only include causes that exist in data
-    direct_causes <- intersect(direct_causes, names(data))
+    # Convert direct causes to safe names and filter to those in data
+    direct_causes_safe <- make_safe_name(direct_causes)
+    direct_causes_safe <- intersect(direct_causes_safe, names(data))
 
     # Build the fixed effects formula string
-    if (length(direct_causes) == 0) {
-      fixed_formula_str <- paste(outcome, "~ 1")
+    if (length(direct_causes_safe) == 0) {
+      fixed_formula_str <- paste(outcome_safe, "~ 1")
     } else {
-      fixed_formula_str <- paste(outcome, "~", paste(direct_causes, collapse = " + "))
+      fixed_formula_str <- paste(outcome_safe, "~", paste(direct_causes_safe, collapse = " + "))
     }
     formula_fixed <- stats::as.formula(fixed_formula_str)
   } else {
@@ -136,7 +160,7 @@ fit_dag <- function(data, dag, outcome,
       stop("`formula_override` must be a formula object (e.g., outcome ~ predictors) if provided.")
     }
     formula_fixed <- formula_override
-    direct_causes <- all.vars(formula_fixed[[3]])
+    direct_causes_safe <- all.vars(formula_fixed[[3]])
   }
 
   # Construct random-effects formula for spatial hierarchy if specified
@@ -158,23 +182,28 @@ fit_dag <- function(data, dag, outcome,
   # Add offset for count models
   offset_str <- NULL
   if (!is.null(offset_col) && offset_col %in% names(data)) {
+    # Create safe column name for log offset
+    log_offset_name <- paste0("log_", offset_col)
     # Ensure positive values for log offset
-    data[[paste0("log_", offset_col)]] <- log(pmax(data[[offset_col]], 1))
-    offset_str <- paste0("offset(log_", offset_col, ")")
+    data[[log_offset_name]] <- log(pmax(data[[offset_col]], 1))
+    offset_str <- paste0("offset(", log_offset_name, ")")
   }
 
   # Combine fixed, random, and offset parts into the final formula
-  formula_parts <- deparse(formula_fixed)
+  formula_str <- deparse(formula_fixed, width.cutoff = 500)
+  if (length(formula_str) > 1) {
+    formula_str <- paste(formula_str, collapse = " ")
+  }
   if (!is.null(offset_str)) {
-    formula_parts <- paste(formula_parts, "+", offset_str)
+    formula_str <- paste(formula_str, "+", offset_str)
   }
   if (!is.null(random_formula_str)) {
-    formula_parts <- paste(formula_parts, "+", random_formula_str)
+    formula_str <- paste(formula_str, "+", random_formula_str)
   }
-  final_formula <- stats::as.formula(formula_parts)
+  final_formula <- stats::as.formula(formula_str)
 
   # Determine variables needed for model
-  vars_needed <- c(outcome, direct_causes)
+  vars_needed <- c(outcome_safe, direct_causes_safe)
   if (!is.null(spatial_levels)) {
     vars_needed <- c(vars_needed, spatial_levels)
   }
@@ -240,10 +269,22 @@ fit_dag <- function(data, dag, outcome,
 
   # Fit the Bayesian model using brms (HMC via Stan)
   if (!is.null(weights_vec)) {
-    # Add weights to data
-    data_complete$ipw_weight <- weights_vec
+    # Add weights as a column in data_complete
+    data_complete$ipw_weights <- weights_vec
+
+    # Reconstruct formula with weights on LHS: outcome | weights(w) ~ predictors
+    formula_char <- deparse(final_formula, width.cutoff = 500)
+    if (length(formula_char) > 1) formula_char <- paste(formula_char, collapse = " ")
+
+    # Split at ~ and add weights
+    formula_parts <- strsplit(formula_char, "~")[[1]]
+    lhs <- trimws(formula_parts[1])
+    rhs <- trimws(paste(formula_parts[-1], collapse = "~"))
+    weighted_formula_str <- paste0(lhs, " | weights(ipw_weights) ~ ", rhs)
+    weighted_formula <- stats::as.formula(weighted_formula_str)
+
     fit <- brms::brm(
-      formula = final_formula,
+      formula = weighted_formula,
       data    = data_complete,
       family  = family,
       prior   = priors,
@@ -253,7 +294,6 @@ fit_dag <- function(data, dag, outcome,
       warmup  = warmup,
       seed    = seed,
       control = control,
-      weights = ipw_weight,
       ...
     )
   } else {
@@ -540,3 +580,4 @@ predict_deaths <- function(fit, newdata = NULL, summary = TRUE) {
     return(preds)
   }
 }
+
