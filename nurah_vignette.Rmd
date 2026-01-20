@@ -839,7 +839,7 @@ The `create_scenario_grid()` function generates a factorial design varying:
 ```{r scenario-grid}
 # Create scenario grid
 scenarios <- create_scenario_grid(
-  n_govs = 10,
+  n_govs = 5,
   n_months = 12,
   noise_levels = c(0.5, 1.0),
   regimes = c("MCAR", "MAR", "MNAR"),
@@ -886,7 +886,7 @@ study_results <- run_simulation_study(
 study_summary <- summarize_study_results(study_results)
 ```
 
-**Note**: This code is not evaluated in the vignette because it takes significant computation time (hours to days depending on the number of scenarios and replicates). For actual research use, run this as a batch job on a computing cluster.
+**Note**: This code is not evaluated in the vignette because it takes significant computation time (hours depending on the number of scenarios and replicates). For actual research use, run this as a batch job on a computing cluster.
 
 ## Example Results Visualization
 
@@ -989,11 +989,9 @@ The simulation study demonstrates several important points for mortality estimat
 
 2. **IPW substantially reduces bias under MAR assumptions** by upweighting observations from high-missingness contexts. When missingness depends only on observed covariates, IPW can recover unbiased estimates.
 
-3. **MNAR remains challenging** — when observation probability depends on unobserved outcomes, all methods show residual bias. No purely statistical fix can fully address this; substantive knowledge about the missingness mechanism is required.
+3. **Coverage is generally better maintained with IPW**, though both methods can have undercoverage under MNAR. Confidence intervals that are too narrow give false precision.
 
-4. **Coverage is generally better maintained with IPW**, though both methods can have undercoverage under MNAR. Confidence intervals that are too narrow give false precision.
-
-5. **More missingness means more bias** — the relationship is roughly linear. Investing in data collection, even partial, pays dividends in estimation accuracy.
+4. **More missingness means more bias** — the relationship is roughly linear. Investing in data collection, even partial, pays dividends in estimation accuracy.
 
 ## Recommendations for Practice
 
