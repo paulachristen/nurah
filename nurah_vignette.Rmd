@@ -1,7 +1,7 @@
 ---
 title: "nurah: Simulating and Estimating Indirect Mortality in Crisis Settings"
 subtitle: "Package Vignette and Simulation Feasibility Study"
-author: "Paula"
+author: "Oliver J Watson, Paula Christen"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -86,7 +86,7 @@ Before we can simulate data, we need to define the causal relationships between 
 
 The framework recognises that deaths in crises occur through multiple pathways: direct violence, but also through disrupted healthcare, food insecurity leading to malnutrition, displacement causing disease outbreaks, and mental health impacts. Each of these pathways operates on different timescales and with different magnitudes.
 
-The `checchi_2017_dag()` function creates this DAG structure, and `dummy_checchi_2017_parameters()` provides plausible effect sizes and time lags for each causal pathway. In a real application, you would calibrate these parameters to empirical estimates from the literature.
+The `checchi_2017_dag()` function creates this DAG structure, and `dummy_checchi_2017_parameters()` provides plausible effect sizes and time lags for each causal pathway. In a real application, these parameters would be calibrated to empirical estimates from the literature.
 
 ```{r define-dag}
 # Load the Checchi et al. (2017) DAG with dummy parameters
@@ -97,11 +97,11 @@ cat("DAG class:", class(dag), "\n")
 cat("Number of edges:", nrow(dag$parameters), "\n")
 ```
 
-The output tells us we have a `nurah_dag` object with 30 directed edges connecting the various health domains to each other and ultimately to population mortality.
+The output tells that the `nurah_dag` object with 30 directed edges connecting the various health domains to each other and ultimately to population mortality.
 
 ## Visualizing the DAG
 
-Visualising the DAG helps us understand the assumed causal structure. In the diagram below, arrows represent causal relationships — an arrow from A to B means that A causally affects B. The position of nodes roughly reflects the causal ordering, with upstream exposures (like armed conflict) on the left and downstream outcomes (like mortality) on the right.
+Visualising the DAG helps to understand the assumed causal structure. In the diagram below, arrows represent causal relationships — an arrow from A to B means that A causally affects B. The position of nodes roughly reflects the causal ordering, with upstream exposures (like armed conflict) on the left and downstream outcomes (like mortality) on the right.
 
 ```{r visualize-dag, fig.height=8, fig.width=12}
 # Visualize the DAG
@@ -140,7 +140,7 @@ The largest effects come from epidemic occurrence and burden of endemic infectio
 
 ## Custom DAG Definition
 
-While the Checchi framework is comprehensive, you may want to define simpler DAGs for specific analyses or to test hypotheses about particular causal pathways. The `define_dag()` function allows you to create custom causal structures.
+While the Checchi framework is comprehensive, simpler DAGs can be defined for specific analyses or to test hypotheses about particular causal pathways. The `define_dag()` function allows to create custom causal structures.
 
 Here we define a simplified 6-node DAG that captures the core pathway from conflict through displacement and food insecurity to mortality:
 
@@ -166,7 +166,7 @@ simple_params <- data.frame(
 simple_dag <- define_dag(simple_nodes, simple_edges, simple_params)
 ```
 
-This simplified DAG might be useful when you want to focus on a specific mechanistic question, or when data availability limits the number of intermediate variables you can measure.
+This simplified DAG might be useful when the focus is on a specific mechanistic question, or when data availability limits the number of intermediate variables that can be measured.
 
 ---
 
@@ -180,7 +180,7 @@ The key parameters are:
 
 - **`dag`**: The causal structure we defined above
 - **`start_date`** and **`n_periods`**: The temporal extent of the simulation
-- **`resolution`**: The time unit for output (we use "month" for governorate-month data)
+- **`resolution`**: The time unit for output (e.g., "month" for governorate-month data)
 - **`spatial_structure`**: Names or number of spatial units (governorates)
 - **`initial_population`**: Starting population per governorate
 - **`noise_level`**: Controls stochastic variation (1 = full randomness, 0 = deterministic)
@@ -211,7 +211,7 @@ cat("Time periods:", length(unique(sim_data$date)), "\n")
 
 The output is a data frame with 120 rows (5 governorates × 12 months) and columns for each node in the DAG plus administrative identifiers. This structure mirrors the format of real governorate-level health data.
 
-Let's examine some summary statistics of the simulated mortality:
+The following provides some summary statistics of the simulated mortality:
 
 ```{r sim-summary}
 # Summary of key variables
@@ -281,7 +281,7 @@ The histogram shows the right-skewed distribution typical of count data, while t
 
 ## Spatial and Temporal Patterns
 
-To better understand the simulated data, let's aggregate across space and time separately. This reveals the overall temporal trend in mortality and the relative burden across governorates.
+To better understand the simulated data, the data can be aggregated across space and time separately. This reveals the overall temporal trend in mortality and the relative burden across governorates.
 
 ```{r spatiotemporal-patterns, fig.height=6}
 # Aggregate patterns
@@ -323,9 +323,9 @@ The temporal pattern may show trends driven by the simulated crisis dynamics (e.
 
 ## Overview of Missingness Mechanisms
 
-In real crisis settings, we rarely observe complete data. Health facilities may be destroyed, staff displaced, supply chains disrupted, and communication networks severed. This creates **systematic** patterns of missingness — data is not missing at random, but rather missing precisely from the times and places where conditions are worst.
+In real crisis settings, complete data is rareky observed. Health facilities may be destroyed, staff displaced, supply chains disrupted, and communication networks severed. This creates **systematic** patterns of missingness — data is not missing at random, but rather missing precisely from the times and places where conditions are worst.
 
-We distinguishe across three mechanisms of missingness:
+We distinguish across three mechanisms of missingness:
 
 | Regime | Mechanism | Implications |
 |--------|-----------|--------------|
@@ -333,7 +333,7 @@ We distinguishe across three mechanisms of missingness:
 | **MAR** | Missing at Random | Missingness depends on **observed** variables; can be corrected with IPW or imputation |
 | **MNAR** | Missing Not at Random | Missingness depends on **unobserved** values themselves; no fully satisfactory solution |
 
-The nurah package implements all three regimes, allowing us to evaluate estimator performance under different assumptions about the missingness mechanism.
+The nurah package implements all three regimes, allowing to evaluate estimator performance under different assumptions about the missingness mechanism.
 
 Mathematically, for each predictor variable $k$ in governorate $i$ at time $t$, we generate an observation indicator $S_{itk}$ from:
 
@@ -348,6 +348,7 @@ where the observation probability $\pi_{itk}$ is modelled on the logit scale:
 | **MNAR** | $\text{logit}(\pi_{itk}) = \alpha + \sum_d w_d \cdot D_{dit} + \omega \cdot X_{itk}$ |
 
 Here:
+
 - $\alpha$ determines the baseline observation probability (via $\pi_{\text{base}} = \text{logit}^{-1}(\alpha)$)
 - $D_{dit}$ are observed "drivers" of missingness (e.g., conflict intensity, displacement)
 - $w_d$ are weights determining how strongly each driver affects observation probability
@@ -491,7 +492,7 @@ ggplot(miss_summary, aes(x = date, y = variable, fill = miss_rate)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 ```
 
-Under MCAR, the heatmap should show relatively uniform missingness across time and variables. Under MAR and MNAR, you may see temporal patterns (more missingness when conflict is intense) and potentially variable-specific patterns (some indicators harder to collect than others).
+Under MCAR, the heatmap should show relatively uniform missingness across time and variables. Under MAR and MNAR, one may see temporal patterns (more missingness when conflict is intense) and potentially variable-specific patterns (some indicators harder to collect than others).
 
 ## Gaza-Style Missingness Mask
 
@@ -596,7 +597,7 @@ fit_cc <- fit_dag(
 )
 ```
 
-The message tells us how many rows were dropped due to missing values. With MAR missingness, the dropped observations are not a random sample — they're systematically from times and places with worse conditions. This typically leads to **underestimation** of mortality.
+The message tells how many rows were dropped due to missing values. With MAR missingness, the dropped observations are not a random sample — they're systematically from times and places with worse conditions. This typically leads to **underestimation** of mortality.
 
 ```{r cc-summary}
 # Model summary
@@ -890,7 +891,7 @@ study_summary <- summarize_study_results(study_results)
 
 ## Example Results Visualization
 
-To illustrate the kind of results you would obtain, we create synthetic example data that reflects the expected patterns:
+To illustrate the kind of results that can be obtained, this is synthetic example data that reflects the expected patterns:
 
 ```{r example-results-viz, fig.height=8}
 # Create example results for visualization (simulated for vignette)
@@ -997,13 +998,11 @@ The simulation study demonstrates several important points for mortality estimat
 
 Based on these findings, we recommend:
 
-- **Always characterise missingness patterns** in your data before choosing an analysis method. Plot missingness rates by time, location, and variable to understand the mechanism.
+- **Always characterise missingness patterns** in the data before choosing an analysis method. Plot missingness rates by time, location, and variable to understand the mechanism.
 
 - **Use IPW** when missingness is plausibly related to observed crisis indicators. This is likely the case in most conflict settings where data collection tracks access and security conditions.
 
 - **Conduct sensitivity analyses** for MNAR assumptions using varying values of $\omega$. Report a range of estimates rather than a single point estimate.
-
-- **Report uncertainty honestly** — acknowledge that estimates may be biased under MNAR and that confidence intervals may have less than nominal coverage.
 
 - **Combine multiple data sources** where possible. Different sources may have different missingness patterns, and triangulation can improve robustness.
 
