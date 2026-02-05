@@ -281,10 +281,10 @@ visualise_dag <- function(dag,
     tidy_dag <- ggdag::tidy_dagitty(dag$dag)
   }
 
-  # create default plot
-  ggdag::ggdag(tidy_dag, edge_type = "arc", text = FALSE) +
-    ggdag::geom_dag_point(color = node_color, size = 8) +
+  # create default plot - use ggplot base to avoid double-drawing edges
+  ggplot2::ggplot(tidy_dag, ggplot2::aes(x = x, y = y, xend = xend, yend = yend)) +
     ggdag::geom_dag_edges(edge_color = "gray40") +
+    ggdag::geom_dag_point(color = node_color, size = 8) +
     ggdag::geom_dag_label(ggplot2::aes(label = .data$name), size = label_size) +
     ggdag::theme_dag() +
     ggplot2::labs(title = "Directed Acyclic Graph (DAG)")
